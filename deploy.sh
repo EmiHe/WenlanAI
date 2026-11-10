@@ -24,33 +24,18 @@ if ! docker compose version >/dev/null 2>&1; then
   exit 1
 fi
 
-# embedding 模型预检（必须在 build 之前，避免数分钟构建后才在 entrypoint 报错）
-embedding_dir="backend/embedding/models--sentence-transformers--paraphrase-multilingual-MiniLM-L12-v2"
-if [ ! -d "$embedding_dir" ]; then
-  cat >&2 <<EOF
-================================================================
-❌ 缺少 AI 向量模型，无法构建镜像
-================================================================
-
-未找到必需的 embedding 模型目录：
-  $embedding_dir
-
-获取方式（约 500MB，免费）：
-
-  1. 加入 QQ 交流群：893474348
-  2. 在群文件中下载 AI 向量模型压缩包
-  3. 解压到 backend/embedding/ 目录，最终结构应为：
-
-       backend/embedding/
-       └── models--sentence-transformers--paraphrase-multilingual-MiniLM-L12-v2/
-           └── (模型权重和配置文件)
-
-  4. 重新执行 ./deploy.sh
-
-模型文件被 .gitignore 排除，必须手动下载后再构建镜像。
-================================================================
-EOF
-  exit 1
+# 向量（记忆检索）模型不是必需的：backend/embedding/ 里有模型就随镜像打包；没有则由容器首次启动时自动下载
+shopt -s nullglob
+embedding_models=(backend/embedding/models--*/)
+shopt -u nullglob
+if [ "${#embedding_models[@]}" -gt 0 ]; then
+  log "向量模型：backend/embedding/ 里已有模型，会打包进镜像，容器启动时不用再下载"
+  for model_dir in "${embedding_models[@]}"; do
+    log "  - $(basename "$model_dir")"
+  done
+else
+  log "向量模型：backend/embedding/ 里没有模型，容器首次启动时会自动下载中文模型 bge-small-zh（约 95MB）"
+  log "  下载失败也照常启动，只是暂时没有语义检索；之后可在「设置 → 记忆检索」里重新下载"
 fi
 
 if [ ! -f .env ]; then
@@ -88,16 +73,28 @@ health_url="http://localhost:${app_port}/health/ready"
 log "启动容器（首次构建可能需要 5-10 分钟）"
 docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --build
 
-log "等待服务就绪检查（最多 60 秒）"
-for _ in {1..30}; do
-  if curl -fsS "$health_url" >/dev/null 2>&1; then
-    log "✅ 部署成功，访问地址: http://localhost:${app_port}"
-    exit 0
+# 首次启动可能要先下载向量模型（约 95MB，下载源不通时三个源各等 30 秒超时），所以多等一会儿；
+# 容器退出 / 反复重启就不用干等，直接打出日志
+health_timeout=420
+container_name="mumuainovel"
+log "等待服务就绪（最多 $((health_timeout / 60)) 分钟，首次启动可能要下载向量模型）"
+log "  看启动进度：docker compose logs -f ${container_name}"
+deadline=$((SECONDS + health_timeout))
+# 本机自检不走代理：设了 HTTP(S)_PROXY 时别把 localhost 的请求发给代理
+until curl -fsS -m 5 --noproxy '*' -o /dev/null "$health_url" 2>/dev/null; do
+  state="$(docker inspect -f '{{.State.Status}}' "$container_name" 2>/dev/null || echo missing)"
+  if [ "$state" != "running" ] || [ "$SECONDS" -ge "$deadline" ]; then
+    if [ "$state" != "running" ]; then
+      err "容器没有正常运行（状态：${state}），最近的日志："
+    else
+      err "服务未在 $((health_timeout / 60)) 分钟内就绪，最近的日志："
+    fi
+    docker logs --tail 60 "$container_name" >&2 || true
+    echo "请执行以下命令继续排查：" >&2
+    echo "  docker compose logs -f ${container_name}" >&2
+    exit 1
   fi
-  sleep 2
+  sleep 5
 done
 
-err "服务未在预期时间内就绪"
-echo "请执行以下命令排查：" >&2
-echo "  docker compose logs -f mumuainovel" >&2
-exit 1
+log "✅ 部署成功，访问地址: http://localhost:${app_port}"

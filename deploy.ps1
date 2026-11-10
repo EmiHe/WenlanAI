@@ -53,33 +53,19 @@ if ($LASTEXITCODE -ne 0) {
   throw "docker compose plugin not found. Please update Docker Desktop."
 }
 
-# embedding 模型预检（必须在 build 之前）
-$embeddingDir = 'backend/embedding/models--sentence-transformers--paraphrase-multilingual-MiniLM-L12-v2'
-if (-not (Test-Path $embeddingDir)) {
-  Write-Host ""
-  Write-Host "================================================================" -ForegroundColor Red
-  Write-Host "  缺少 AI 向量模型，无法构建镜像" -ForegroundColor Red
-  Write-Host "================================================================" -ForegroundColor Red
-  Write-Host ""
-  Write-Host "未找到必需的 embedding 模型目录：" -ForegroundColor Yellow
-  Write-Host "  $embeddingDir" -ForegroundColor Yellow
-  Write-Host ""
-  Write-Host "获取方式（约 500MB，免费）：" -ForegroundColor Yellow
-  Write-Host ""
-  Write-Host "  1. 加入 QQ 交流群：893474348" -ForegroundColor White
-  Write-Host "  2. 在群文件中下载 AI 向量模型压缩包" -ForegroundColor White
-  Write-Host "  3. 解压到 backend/embedding/ 目录，最终结构应为：" -ForegroundColor White
-  Write-Host ""
-  Write-Host "       backend/embedding/" -ForegroundColor Gray
-  Write-Host "       └── models--sentence-transformers--paraphrase-multilingual-MiniLM-L12-v2/" -ForegroundColor Gray
-  Write-Host "           └── (模型权重和配置文件)" -ForegroundColor Gray
-  Write-Host ""
-  Write-Host "  4. 重新执行 ./deploy.ps1" -ForegroundColor White
-  Write-Host ""
-  Write-Host "模型文件被 .gitignore 排除，必须手动下载后再构建镜像。" -ForegroundColor Yellow
-  Write-Host "================================================================" -ForegroundColor Red
-  Write-Host ""
-  exit 1
+# 向量（记忆检索）模型不是必需的：backend/embedding/ 里有模型就随镜像打包；没有则由容器首次启动时自动下载
+$embeddingModels = @()
+if (Test-Path 'backend/embedding') {
+  $embeddingModels = @(Get-ChildItem -Path 'backend/embedding' -Directory -Filter 'models--*' | Select-Object -ExpandProperty Name)
+}
+if ($embeddingModels.Count -gt 0) {
+  Write-Step "向量模型：backend/embedding/ 里已有模型，会打包进镜像，容器启动时不用再下载"
+  foreach ($modelName in $embeddingModels) {
+    Write-Host "  - $modelName"
+  }
+} else {
+  Write-Step "向量模型：backend/embedding/ 里没有模型，容器首次启动时会自动下载中文模型 bge-small-zh（约 95MB）"
+  Write-Host "  下载失败也照常启动，只是暂时没有语义检索；之后可在「设置 → 记忆检索」里重新下载"
 }
 
 if (-not (Test-Path '.env')) {
@@ -121,21 +107,52 @@ if (-not $NoBuild) {
 Write-Step "Starting containers (首次构建可能需要 5-10 分钟)"
 docker compose @composeArgs
 
-Write-Step "Waiting for readiness endpoint (最多 60 秒)"
-$maxRetry = 30
-for ($i = 1; $i -le $maxRetry; $i++) {
+# 首次启动可能要先下载向量模型（约 95MB，下载源不通时三个源各等 30 秒超时），所以多等一会儿；
+# 容器退出 / 反复重启就不用干等，直接打出日志
+$healthTimeoutSec = 420
+$containerName = 'mumuainovel'
+
+function Get-ContainerState($name) {
+  # 容器不存在时 docker inspect 会写 stderr；Windows PowerShell 5.1 在 Stop 模式下重定向 stderr 会抛错，这里兜住
   try {
-    $resp = Invoke-WebRequest -Uri $healthUrl -UseBasicParsing -TimeoutSec 3
+    $state = & docker inspect -f '{{.State.Status}}' $name 2>$null
+  } catch {
+    return 'missing'
+  }
+  if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace("$state")) {
+    return 'missing'
+  }
+  return "$state".Trim()
+}
+
+Write-Step "Waiting for readiness endpoint (最多 $($healthTimeoutSec / 60) 分钟，首次启动可能要下载向量模型)"
+Write-Host "  看启动进度：docker compose logs -f $containerName" -ForegroundColor Gray
+$deadline = (Get-Date).AddSeconds($healthTimeoutSec)
+while ($true) {
+  try {
+    $resp = Invoke-WebRequest -Uri $healthUrl -UseBasicParsing -TimeoutSec 5 -ErrorAction Stop
     if ($resp.StatusCode -eq 200) {
       Write-Host "✅ 部署成功，访问地址: http://localhost:$appPort" -ForegroundColor Green
       exit 0
     }
   } catch {
-    Start-Sleep -Seconds 2
+    # 还没就绪，继续等
   }
+
+  $state = Get-ContainerState $containerName
+  if ($state -ne 'running' -or (Get-Date) -ge $deadline) {
+    break
+  }
+  Start-Sleep -Seconds 5
 }
 
-Write-Err "服务未在预期时间内就绪"
-Write-Host "请执行以下命令排查：" -ForegroundColor Yellow
-Write-Host "  docker compose logs -f mumuainovel" -ForegroundColor Yellow
+if ($state -ne 'running') {
+  Write-Err "容器没有正常运行（状态：$state），最近的日志："
+} else {
+  Write-Err "服务未在 $($healthTimeoutSec / 60) 分钟内就绪，最近的日志："
+}
+$ErrorActionPreference = 'Continue'
+docker logs --tail 60 $containerName
+Write-Host "请执行以下命令继续排查：" -ForegroundColor Yellow
+Write-Host "  docker compose logs -f $containerName" -ForegroundColor Yellow
 exit 1

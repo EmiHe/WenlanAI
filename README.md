@@ -79,7 +79,11 @@ chmod +x deploy.sh
 ./deploy.sh
 ```
 
-> 首次执行会自动检查 Docker / Compose、补齐缺失文件并等待健康检查通过。
+> 首次执行会自动检查 Docker / Compose、补齐缺失文件并等待健康检查通过（最多等 7 分钟）。
+>
+> **向量模型不用提前准备。** `backend/embedding/` 里有模型（如 QQ 群文件里的模型包）就随镜像打包；没有的话，容器首次启动时自动下载中文模型 bge-small-zh（约 95MB，依次试 `HF_ENDPOINT` → hf-mirror.com → huggingface.co）。下载失败也照常启动，只是暂时没有语义检索，一天内重启不再重试，可进系统后在「设置 → 记忆检索」里重新下载；不想自动下载就在 `.env` 里设 `EMBEDDING_AUTO_DOWNLOAD=false`。自动下载的模型存在容器里，容器重建（如 `docker compose down` 后再 `up`、升级重建镜像）后会再下载一次。
+>
+> Linux/macOS 上密码文件请设成 644（`secrets/` 目录 700），不要设 600：容器以非 root 用户运行，读不到 600 的密码文件会起不来，详见 [`secrets/README.md`](secrets/README.md)。
 
 ### 2) 手动部署命令（等价）
 
@@ -140,7 +144,7 @@ docker compose start mumuainovel
 
 1. `docker compose ps` 查看是否有容器退出。
 2. `docker compose logs -f` 查看报错栈。
-3. 检查 `secrets/*.txt` 是否仍是 `CHANGE_ME` 占位值。
+3. 检查 `secrets/*.txt` 是否仍是 `CHANGE_ME` 占位值；日志报「本地账户密码未配置」但文件里有密码时，多半是文件权限为 600，改成 `chmod 644 secrets/local_auth_password.txt`。
 4. 检查 `.env` 中端口是否冲突（`APP_PORT`）。
 5. 验证就绪检查：`http://localhost:8000/health/ready`。
 
