@@ -37,34 +37,30 @@ EOF
   exit 1
 fi
 
-required_embedding_dir="/app/embedding/models--sentence-transformers--paraphrase-multilingual-MiniLM-L12-v2"
-if [ ! -d "$required_embedding_dir" ]; then
-  cat >&2 <<'EOF'
-================================================================
-[MuMuAINovel] ❌ 缺少 AI 向量模型，容器无法启动
-================================================================
-
-容器内未找到必需的 embedding 模型：
-  /app/embedding/models--sentence-transformers--paraphrase-multilingual-MiniLM-L12-v2/
-
-获取方式（约 500MB，免费）：
-
-  1. 加入 QQ 交流群：893474348
-  2. 在群文件中下载 AI 向量模型压缩包
-  3. 解压到主机的 backend/embedding/ 目录，最终结构应为：
-
-       backend/embedding/
-       └── models--sentence-transformers--paraphrase-multilingual-MiniLM-L12-v2/
-           └── (模型权重和配置文件)
-
-  4. 重新执行 ./deploy.sh 或 docker compose up -d --build
-
-注意：模型文件被 .gitignore 排除，必须手动下载后再构建镜像。
-================================================================
-EOF
-  exit 1
-fi
-
 mkdir -p /app/data /app/logs
+
+# 向量（记忆检索）模型：/app/embedding 里一个模型都没有时，首次启动自动下载默认中文模型 bge-small-zh（约 95MB，
+# 依次试 HF_ENDPOINT → hf-mirror.com → huggingface.co）。下载失败不阻止启动：应用以「无语义检索」降级模式运行
+# （召回只用人物 / 关键词），之后可在「设置 → 记忆检索」里重新下载；失败后一天内重启不再重试。
+# 构建镜像前把模型放进 backend/embedding/（如 QQ 群里的模型包）则不会下载；EMBEDDING_AUTO_DOWNLOAD=false 关闭自动下载。
+if [ "${EMBEDDING_AUTO_DOWNLOAD:-true}" != "false" ]; then
+  python - <<'PY' || echo "[MuMuAINovel] ⚠️ 向量模型检查出错，跳过（应用照常启动）" >&2
+import sys
+
+from app.services import embedding_bootstrap as eb
+
+
+def log(level, message):
+    print(f"[MuMuAINovel] {message}", file=sys.stderr, flush=True)
+
+
+if eb.model_present():
+    sys.exit(0)
+if eb.has_recent_failure():
+    log("WARNING", "⚠️ 未找到向量模型，上次自动下载失败还不到一天，本次跳过；可在「设置 → 记忆检索」里手动下载")
+    sys.exit(0)
+eb.ensure_embedding_model(log)
+PY
+fi
 
 exec "$@"

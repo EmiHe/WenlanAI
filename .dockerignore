@@ -83,3 +83,5 @@ backend/static/
 
 # Secrets（运行时挂载，不进入构建上下文）
 secrets/*.txt
+# 服务器部署脚本与其生成的配置（不进镜像）
+deploy/

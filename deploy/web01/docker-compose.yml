@@ -1,0 +1,73 @@
+# 文澜 AI · web01 服务器部署（write.urai.uk）
+#
+# 和服务器上其他项目隔离：
+#   - 独立的 Compose 项目名 wenlanai、容器名 wenlanai、镜像 wenlanai:local（不会覆盖别人的同名镜像 / 容器）
+#   - 独立网络 wenlanai_default、独立数据卷 wenlanai_data / wenlanai_logs / wenlanai_embedding
+#   - 端口只绑 127.0.0.1（默认 18080 起找空闲端口），不对公网开放，由宿主机 nginx 反代
+#   - 限制内存 / CPU / 进程数，不会把整台机器拖死
+#
+# 不要直接 docker compose up，用同目录的 deploy.sh（会生成本目录的 .env：端口、构建镜像源、资源上限）。
+# 应用配置（AI Key 等）在仓库根目录 .env，管理员密码在仓库根目录 secrets/local_auth_password.txt。
+
+name: wenlanai
+
+services:
+  app:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+      args:
+        NPM_REGISTRY: ${NPM_REGISTRY:-https://registry.npmmirror.com}
+        PIP_INDEX_URL: ${PIP_INDEX_URL:-https://mirrors.aliyun.com/pypi/simple/}
+        DEBIAN_MIRROR: ${DEBIAN_MIRROR-mirrors.aliyun.com}
+    image: wenlanai:local
+    container_name: wenlanai
+    env_file:
+      - ../../.env
+    environment:
+      APP_HOST: 0.0.0.0
+      APP_PORT: 8000
+      LOCAL_AUTH_PASSWORD_FILE: /run/secrets/local_auth_password
+    ports:
+      - "${BIND_ADDR:-127.0.0.1}:${HOST_PORT:-18080}:8000"
+    volumes:
+      - data:/app/data
+      - logs:/app/logs
+      # 向量模型放数据卷：首次启动自动下载一次，之后重建镜像也不用重下
+      - embedding:/app/embedding
+    secrets:
+      - local_auth_password
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health/ready')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      # 首次启动要下载向量模型（约 95MB）+ 数据库迁移，多留时间
+      start_period: 180s
+    mem_limit: ${MEM_LIMIT:-2g}
+    cpus: ${CPU_LIMIT:-2.0}
+    pids_limit: 512
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "5"
+    tmpfs:
+      - /tmp:size=256m,mode=1777
+
+volumes:
+  data:
+    name: wenlanai_data
+  logs:
+    name: wenlanai_logs
+  embedding:
+    name: wenlanai_embedding
+
+secrets:
+  local_auth_password:
+    file: ../../secrets/local_auth_password.txt
